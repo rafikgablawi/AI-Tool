@@ -1,6 +1,8 @@
-# 🧠 Website-Generator KI
+# 🧠 AI Hub – Website- & PowerPoint-Generator
 
-Mit dem **Website-Generator KI** kannst du Webseiten in Sekunden automatisch via KI generieren lassen – gib einfach eine Beschreibung ein, lade Bilder hoch und wähle dein Wunsch-KI-Modell aus. Perfekt für Portfolios, Landingpages, One-Pager und mehr.
+Mit dem **AI Hub** kannst du zwei mächtige Tools zentral starten:  
+🌐 **Website-Generator** und 📊 **PowerPoint-Generator** – beide gesteuert über die **Ollama Cloud API** (OpenAI-kompatibel).  
+Einheitliches Design, moderne Oberfläche, volle Kontrolle über KI-Modelle & Ausgabequalität.
 
 ---
 
@@ -8,152 +10,176 @@ Mit dem **Website-Generator KI** kannst du Webseiten in Sekunden automatisch via
   <img src="static/logo.jpg" alt="Logo" width="120" style="border-radius:12px;margin-bottom:10px">
 </div>
 
-## Features
+## 🚀 Features
 
-- **💡 Intelligente HTML-Generierung**:  
-  Beschreibe deine Wunschwebsite (z. B. "Referenzen, Hero-Bereich, Kontakt") und erhalte voll funktionsfähige, moderne HTML-Onepager mit CSS.
-- **🔮 Live-Vorschau im iFrame**:  
-  Das KI-generierte Ergebnis wird direkt gerendert – ohne Nachladen.
-- **🧩 Flexible Modellauswahl**:  
-  Setze z. B. auf DeepSeek, Qwen3-Coder, MiniMax oder GPT-OSS (über Ollama Cloud-API) – für verschiedene Zwecke und Budget wählbar.
-- **🖼 Bild-Upload-Funktion**:  
-  Lade beliebig viele eigene Bilder hoch, die garantiert in das Design eingebaut werden (Galerie, Hero, Thumbnails etc.).
-- **⚙️ Token- und Temperature-Presets**:  
-  Passe Kreativität und Output-Größe an (modellspezifisch).
-- **⬇️ Download-Funktion**:  
-  Exportiere Entwürfe als HTML oder als vollständiges ZIP-Bundle inkl. aller Bilder auf Knopfdruck.
-- **👩‍🎨 Saubere, moderne UI**:  
-  Responsive und übersichtlich gestaltet, dark mode-freundlich.
+- **🌐 Website-Generator:**  
+  Erstelle komplette HTML-Onepager mit CSS – beschreibe dein Projekt, lade Bilder hoch, erhalte sofort eine fertige Website.
+- **📊 PowerPoint-Generator:**  
+  Generiere PPTX-Präsentationen mit automatisch strukturierten Folien, Titeln und Stichpunkten.
+- **🧩 Zentrale Modell-Auswahl:**  
+  Gleiche Presets für beide Tools – DeepSeek V3.1, Qwen3-Coder, GLM-4.6 u. a.
+- **☁️ Ollama Cloud Support:**  
+  Vollständig kompatibel mit jedem `/v1/chat/completions`-Endpoint.
+- **💾 Download & Export:**  
+  Websites als ZIP, Folien als PPTX – direkt per Knopfdruck.
+- **🎨 Dark UI:**  
+  Responsive, übersichtlich, modern.
 
 ---
 
-## Schnellstart
+## 🧠 Schnellstart
 
-1. **Backend starten:**  
-    Das Backend (`server.py`) ist mit FastAPI implementiert und spricht mit Ollama Cloud.  
-    (Python 3.10+, siehe Setup unten)
+### 1️⃣ Repository klonen
+```bash
+git clone https://github.com/<dein-benutzername>/ai-hub.git
+cd ai-hub
+```
 
-2. **Repository klonen:**  
-   ```bash
-   git clone https://github.com/rafikgablawi/Website-Generator-KI.git
-   cd Website-Generator-KI
-   ```
+### 2️⃣ Python-Umgebung
+```bash
+python -m venv venv
+source venv/bin/activate    # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-3. **Frontend öffnen:**  
-   `index.html` einfach im Browser öffnen.  
-   *(Vollständige Funktion, inkl. Bild-Upload nur über das Backend!)*
+### 3️⃣ .ENV anlegen
+```env
+OLLAMA_API_KEY=dein_api_key
+OLLAMA_CLOUD_BASE=https://ollama.com/v1
+```
 
-4. **Workflow:**  
-    - Websiteidee beschreiben
-    - Modell wählen, optional Bilder hochladen
-    - **Website erstellen** klicken!
-    - Vorschau prüfen, als HTML oder ZIP speichern
+### 4️⃣ Server starten
+```bash
+python server.py
+# oder
+uvicorn server:app --host 0.0.0.0 --port 8000
+```
+
+➡️ [http://localhost:8000](http://localhost:8000)
 
 ---
 
-## Backendspezifikation & API
+## 🧩 Tool-Übersicht
+
+| Tool | Beschreibung |
+|------|---------------|
+| 🌐 **Website-Generator** | Erzeugt vollständige HTML-Webseiten aus Text-Prompts + Bildern |
+| 📊 **PowerPoint-Generator** | Baut PPTX-Folien automatisch aus einem Thema und Zielpublikum |
+| ⚙️ **Modell-Presets** | Wähle passende KI je nach Anwendungsfall – Code, Text oder Bild |
+| 💾 **Export** | Lade fertige Seiten oder Präsentationen herunter |
+| 🧠 **KI-Optimiert** | Token-Budget & Temperature pro Modell angepasst für max. Qualität |
+
+---
+
+## 🧱 Projektstruktur
+
+```
+AI-Hub/
+├── html/
+│   ├── index.html          # Hub-Startseite
+│   ├── website.html        # Website-Generator-UI
+│   └── ppt.html            # PowerPoint-Generator-UI
+├── static/
+│   └── logo.jpg
+├── server.py               # FastAPI-Backend
+├── requirements.txt
+└── .env
+```
+
+---
+
+## 🧠 Backend-Spezifikation
 
 ### Voraussetzungen
-
 - Python 3.10+
-- FastAPI, Uvicorn, HTTPX
-- Umgebungsvariablen:  
-  - OLLAMA_API_KEY  
-  - OLLAMA_CLOUD_BASE (optional, Default: https://ollama.com/v1)
-- `.env` hinterlegen oder Umgebungsvariablen setzen
+- FastAPI · Uvicorn · HTTPX · python-pptx · dotenv · pydantic
 
-### Installation & Start
-
+### Start
 ```bash
-pip install fastapi uvicorn httpx python-dotenv pydantic
+pip install -r requirements.txt
 python server.py
 ```
 
-Das Backend läuft anschließend auf Port 8000 (Standard).
-
-### Wichtige Endpunkte
+### Haupt-Endpoints
 
 #### `POST /generate`
-
-Erstellt anhand einer Beschreibung und ggf. hochgeladener Bilder ein fertiges HTML-Dokument.
-
+Erzeugt HTML-Website  
+**Body-Beispiel:**
 ```json
 {
-  "prompt": "Deine Wunschbeschreibung",
-  "model": "Modell-Name",
-  "max_tokens": 1200,
-  "bundle_id": "optional",
-  "image_names": ["bild3.jpg","bild1.png"]
+  "prompt": "Portfolio mit Galerie und Kontakt",
+  "model": "qwen3-coder:480b-cloud"
 }
 ```
-**Response:**
+
+#### `POST /ppt_generate`
+Erstellt PPTX-Präsentation  
+**Body-Beispiel:**
 ```json
 {
-  "bundle_id": "...",
-  "html": "<html>...</html>",
-  "html_preview": "<html>...</html>",
-  "assets": [ ... ],
-  "applied": { ... }
+  "topic": "Klimawandel Grundlagen",
+  "target": "Schüler 9. Klasse",
+  "slides": 10,
+  "model": "deepseek-v3.1:671b-cloud"
 }
 ```
+
 #### `POST /upload`
+Lädt Bilder für den Website-Generator.
 
-Lädt Userbilder hoch, die garantiert eingebunden werden:
-
-- `files`: Bilder (mehrfach möglich)
-- `bundle_id`: optional, z. B. zum Fortsetzen bestehender Session
-
-#### `GET /bundle/{bundle_id}.zip`
-
-Exportiert die fertige Website inkl. Bilder als ZIP-Archiv.
+#### `GET /bundle/{id}.zip`
+Lädt fertige Website als ZIP.
 
 ---
 
-## Beispiel-Prompts
+## ⚙️ Deployment auf Render
 
-- „Portfolio für Fotografen: Galerie, Über mich, Kontaktformular – dunkles Theme.“
-- „Landingpage für eine SaaS-App: Headline, Features, Screenshots, Pricing, Call-to-Action.“
-- „Business-Seite für Steuerberater, Team-Seite, Standorte, Kontakt.“
-
----
-
-## Modellauswahl & Presets
-
-Wähle aus aktuellen KI-Modellen mit unterschiedlichen Stärken (per Klick auf Kartenelement):
-
-| Modell                    | Kontext  | Ideal Tokens | Temp | Empfehlung                       |
-|---------------------------|:--------:|:------------:|:----:|----------------------------------|
-| deepseek-v3.1:671b-cloud  | 64k      | 3000         | 0.30 | Stärkstes Gesamtmodell           |
-| qwen3-coder:480b-cloud    | 131k     | 1800         | 0.20 | TOP für Code/HTML, Sprachlich    |
-| glm-4.6:cloud             | 128k     | 1600         | 0.35 | Guter Kompromiss                 |
-| gpt-oss:120b-cloud        | 64k      | 1400         | 0.35 | Allrounder                       |
-| qwen3-vl:235b-cloud       | 256k     | 1500         | 0.40 | Stark für Bild+Text              |
-| minimax-m2:cloud          | 200k     | 1200         | 0.40 | Leichtgewichtig, schnell         |
-| gpt-oss:20b-cloud         | 32k      | 900          | 0.45 | Kleine Aufgaben                  |
+1. Repository pushen  
+2. Render → **New Web Service**
+3. **Build Command**
+   ```bash
+   pip install -r requirements.txt
+   ```
+4. **Start Command**
+   ```bash
+   uvicorn server:app --host 0.0.0.0 --port $PORT
+   ```
+5. **Environment Vars**
+   ```
+   OLLAMA_API_KEY=<dein Key>
+   OLLAMA_CLOUD_BASE=https://ollama.com/v1
+   ```
 
 ---
 
-## Screenshots
+## 🤖 Verfügbare Modelle
+
+| Modell | Beschreibung |
+|---------|---------------|
+| DeepSeek V3.1 | stärkstes Gesamtmodell für Reasoning und Coding |
+| Qwen3-Coder | Beste Kombination aus Code & Text |
+| GLM-4.6 | Solide Balance aus Tempo & Qualität |
+| GPT-OSS 120B | Robuster Allrounder |
+| Qwen3-VL | Kombiniert Text + Bild |
+| MiniMax M2 | Schnell und leichtgewichtig |
+| GPT-OSS 20B | Kompaktes Modell für kleine Prompts |
+
+---
+
+## 📸 Screenshots
 
 <div align="center">
-  <img src="https://github.com/rafikgablawi/Website-Generator-KI/raw/main/demo_screenshot1.png" width="700" alt="UI Screenshot" style="border-radius:8px;margin:10px">
+  <img src="static/logo.jpg" width="100" alt="AI Hub Logo" style="border-radius:8px;margin:10px">
 </div>
 
 ---
 
-## Technische Hinweise
+## 🧡 Lizenz
 
-- Alle Webseitenausgaben sind **autark** (kein externes CSS/JS), daher geeignet für direktes Deployment.
-- KI generiert immer vollständiges `<html>`, `<style>`, `<body>`.
-- Bilder werden pfadsicher eingebettet: Preview nutzt absolute, Download relativ-Pfade (`assets/…`).
-- Alle hochgeladenen Assets werden im ZIP bereitgestellt.
+MIT License  
+Frei nutzbar und anpassbar.
 
 ---
 
-## Lizenz
-
-MIT
-
----
-
-**Erstellt von [rafikgablawi](https://github.com/rafikgablawi)**
+**Erstellt von [rafikgablawi](https://github.com/rafikgablawi)**  
+*Für sauberes Design, klare UIs und strukturierte KI-Workflows.*
