@@ -1,5 +1,5 @@
 # server.py
-import os, re, time, io, zipfile, uuid, shutil, json
+import os, re, time, io, zipfile, uuid, json
 from pathlib import Path
 from typing import List, Optional, Dict
 
@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pptx import Presentation
 from pptx.util import Pt
+from dotenv import load_dotenv
 
 # ---------- Verzeichnisse ----------
 BASE_DIR = Path(__file__).resolve().parent
@@ -20,14 +21,13 @@ BUNDLES_DIR = BASE_DIR / "bundles"
 BUNDLES_DIR.mkdir(exist_ok=True)
 
 # ---------- Provider-Konfiguration ----------
-from dotenv import load_dotenv; load_dotenv()
+load_dotenv()
 OLLAMA_API_KEY    = os.getenv("OLLAMA_API_KEY", "").strip()
-# OpenAI-kompatible Schnittstelle (z.B. .../v1)
+# OpenAI-kompatibel, z. B. https://<host>/v1
 OLLAMA_CLOUD_BASE = os.getenv("OLLAMA_CLOUD_BASE", "https://ollama.com/v1").rstrip("/")
 
 # ---------- Modell-Presets (Tokens ↑) ----------
 MODEL_PRESETS = {
-    # context_window: grob; ideal_max: Standard-Ausgabe-Limit; cap: harte Obergrenze pro Request
     "deepseek-v3.1:671b-cloud": {"context_window": 131072, "ideal_max": 5000, "cap": 12000, "temperature": 0.30},
     "qwen3-coder:480b-cloud":   {"context_window": 131072, "ideal_max": 3600, "cap": 10000, "temperature": 0.25},
     "glm-4.6:cloud":            {"context_window": 131072, "ideal_max": 3200, "cap": 9000,  "temperature": 0.35},
@@ -71,7 +71,7 @@ def choose_tokens_and_temp(model: str, requested_max: Optional[int], req_temp: O
     return chosen_max, temperature, meta
 
 # ---------- App ----------
-app = FastAPI(title="Website-Generator KI")
+app = FastAPI(title="AI Hub")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -81,7 +81,7 @@ app.add_middleware(
 )
 app.mount("/static", StaticFiles(directory=str(PUBLIC_DIR)), name="static")
 
-# Pfade auf /html/... wie in deiner Version
+# HTML-Seiten (Hub + Tools)
 INDEX_FILE = BASE_DIR / "html/index.html"
 WEBSITE_FILE = BASE_DIR / "html/website.html"
 PPT_FILE = BASE_DIR / "html/ppt.html"
@@ -123,6 +123,45 @@ class PptReq(BaseModel):
     slides: Optional[int] = 10
     model: Optional[str] = "qwen3-coder:480b-cloud"
     temperature: Optional[float] = 0.30
+
+# ---------- JSON-Schema für PPT-Outline ----------
+SLIDE_JSON_SCHEMA = {
+    "name": "ppt_outline",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "subtitle": {"type": "string"},
+            "slides": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "bullets": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 3,
+                            "maxItems": 6
+                        }
+                    },
+                    "required": ["title", "bullets"]
+                },
+                "minItems": 1
+            },
+            "closing": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "bullets": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 6}
+                },
+                "required": ["title", "bullets"]
+            }
+        },
+        "required": ["title", "slides", "closing"],
+        "additionalProperties": False
+    }
+}
 
 # ---------- Helpers ----------
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -178,26 +217,102 @@ def fix_img_paths_relative(html: str, image_names: List[str]) -> str:
 def absolutize_for_preview(html: str, bundle_id: str) -> str:
     return re.sub(r'(["\'(])assets/', rf'\1/bundles/{bundle_id}/assets/', html)
 
-# ---------- PPT: Outline-Prompt strenger (JSON only, genau N Folien) ----------
+def _dedupe_keep_order(seq):
+    seen=set(); out=[]
+    for s in seq:
+        key = re.sub(r"\s+"," ",str(s)).strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key); out.append(str(s).strip())
+    return out
+
+def normalize_outline(outline: dict, want: int) -> dict:
+    outline = outline or {}
+    outline.setdefault("title", "Präsentation")
+    outline.setdefault("subtitle", "")
+    slides = outline.get("slides") or []
+    if not isinstance(slides, list): slides = []
+
+    cleaned=[]
+    title_seen=set()
+    for s in slides:
+        t = str((s or {}).get("title","")).strip() or "Ohne Titel"
+        tkey = t.lower()
+        if tkey in title_seen:
+            continue
+        title_seen.add(tkey)
+        bullets = _dedupe_keep_order((s or {}).get("bullets") or [])
+        while len(bullets) < 3:
+            bullets.append("Aspekt ergänzen")
+        cleaned.append({"title": t, "bullets": bullets[:6]})
+    slides = cleaned
+
+    while len(slides) < want:
+        idx = len(slides) + 1
+        slides.append({"title": f"Vertiefung {idx}",
+                       "bullets": ["Begriff klären", "kurzes Beispiel", "Hinweis für Praxis"]})
+    if len(slides) > want:
+        slides = slides[:want]
+    outline["slides"] = slides
+
+    closing = outline.get("closing") or {}
+    ctitle = str(closing.get("title","Abschluss")).strip() or "Abschluss"
+    cbul = _dedupe_keep_order(closing.get("bullets") or ["Kernaussage", "Nächste Schritte"])
+    while len(cbul) < 2:
+        cbul.append("Nächste Schritte")
+    outline["closing"] = {"title": ctitle, "bullets": cbul[:6]}
+    return outline
+
+async def refine_slide(model: str, topic: str, target: str, title: str, api_temperature: float = 0.3) -> List[str]:
+    """Erzwingt 3–5 neue, unterscheidbare Bullets für eine einzelne Folie."""
+    prompt_sys = (
+        "Du schreibst prägnante Stichpunkte für Präsentationsfolien. "
+        "Antworte NUR als JSON-Liste von Strings, z. B. [\"Punkt 1\", \"Punkt 2\", \"Punkt 3\"]."
+    )
+    prompt_usr = (
+        f"Thema: {topic}\nZielgruppe: {target}\nFolie: {title}\n"
+        "Gib 3–5 unterschiedliche, konkrete Bullets. Keine Wiederholung, keine Meta-Erklärungen."
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role":"system","content":prompt_sys},
+            {"role":"user","content":prompt_usr}
+        ],
+        "temperature": api_temperature,
+        "max_tokens": 400,
+        "stream": False
+    }
+    # JSON erzwingen (falls unterstützt)
+    payload["response_format"] = {"type": "json_object"}
+    data = await call_provider(payload)
+    txt = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
+    m = re.search(r"\[\s*.*\s*\]\s*$", txt, re.S)
+    raw = m.group(0) if m else txt
+    try:
+        arr = json.loads(raw)
+        if isinstance(arr, dict) and "bullets" in arr:
+            arr = arr["bullets"]
+        if not isinstance(arr, list):
+            return []
+        arr = [str(x).strip() for x in arr if str(x).strip()]
+        return _dedupe_keep_order(arr)[:5]
+    except Exception:
+        return []
+
+# ---------- Prompts ----------
 def ppt_outline_prompt(topic: str, target: str, slides: int) -> dict:
     system = (
         "Du bist ein strenger Präsentations-Assistent. Antworte NUR als gültiges JSON-Objekt.\n"
         f"- Erzeuge GENAU {slides} Inhaltsfolien in \"slides\".\n"
         "- Jede Folie: einzigartiger 'title' und 3–5 prägnante 'bullets' ohne Wiederholungen.\n"
-        "- KEIN Text außerhalb des JSON.\n"
-        "Schema:\n"
-        "{\n"
-        '  \"title\": \"...\",\n'
-        '  \"subtitle\": \"...\",\n'
-        '  \"slides\": [ { \"title\": \"...\", \"bullets\": [\"...\",\"...\"] } ],\n'
-        '  \"closing\": { \"title\": \"...\", \"bullets\": [\"...\",\"...\"] }\n'
-        "}\n"
+        "- KEIN Text außerhalb des JSON."
     )
     user = (
-        f'Thema: \"{topic}\"\n'
-        f'Zielgruppe: \"{target}\"\n'
-        "Struktur: Einführung • Hauptideen • Beispiele/Use-Cases • Zahlen/Fakten • Ausblick/FAQ.\n"
-        "Antwort ausschließlich als JSON-Objekt."
+        f'Thema: "{topic}"\n'
+        f'Zielgruppe: "{target}"\n'
+        "Strukturvorschlag: Einführung • Kernideen • Beispiele/Use-Cases • Zahlen/Fakten • Ausblick/FAQ.\n"
+        "Antwort ausschließlich als JSON-Objekt mit Schlüsseln: title, subtitle, slides[], closing."
     )
     return {
         "messages": [
@@ -234,7 +349,7 @@ def ppt_build(outline: dict) -> io.BytesIO:
             pass
         body = sl.shapes.placeholders[1].text_frame
         body.clear()
-        bullets = (it.get("bullets") or [])[:8]
+        bullets = [b for b in (it.get("bullets") or []) if str(b).strip()][:6]
         if bullets:
             body.text = str(bullets[0])
             body.paragraphs[0].font.size = bullet_font_size
@@ -256,7 +371,7 @@ def ppt_build(outline: dict) -> io.BytesIO:
             pass
         body = sl.shapes.placeholders[1].text_frame
         body.clear()
-        bullets = (cl.get("bullets") or [])[:8]
+        bullets = [b for b in (cl.get("bullets") or []) if str(b).strip()][:6]
         if bullets:
             body.text = str(bullets[0]); body.paragraphs[0].font.size = bullet_font_size
             for b in bullets[1:]:
@@ -290,7 +405,6 @@ async def generate(req: GenReq):
     if not req.prompt:
         raise HTTPException(status_code=400, detail="prompt fehlt")
 
-    # Höheres Standardbudget, falls nicht gesetzt
     max_tokens, temperature, picked = choose_tokens_and_temp(req.model, req.max_tokens or None, req.temperature)
     model = picked["model_canonical"]
 
@@ -324,7 +438,7 @@ async def generate(req: GenReq):
             {"role": "user",   "content": user},
         ],
         "temperature": temperature,
-        "max_tokens": max_tokens,   # höher durch Presets
+        "max_tokens": max_tokens,
         "stream": False,
     }
 
@@ -354,13 +468,12 @@ async def generate(req: GenReq):
         "applied": picked
     }
 
-# ---------- PPT Generate (Tokens ↑, JSON erzwingen falls möglich) ----------
+# ---------- PPT Generate ----------
 @app.post("/ppt_generate")
 async def ppt_generate(req: PptReq):
     if not req.topic:
         raise HTTPException(status_code=400, detail="topic fehlt")
 
-    # Höheres Budget für Outline
     max_tokens, temperature, picked = choose_tokens_and_temp(req.model, 3000, req.temperature)
     model = picked["model_canonical"]
 
@@ -371,8 +484,11 @@ async def ppt_generate(req: PptReq):
         "max_tokens": max_tokens,
         "stream": False
     }
-    # Falls der Provider OpenAI's response_format unterstützt:
-    payload["response_format"] = {"type": "json_object"}
+    # JSON erzwingen, falls vom Provider unterstützt
+    payload["response_format"] = {
+        "type": "json_schema",
+        "json_schema": SLIDE_JSON_SCHEMA
+    }
 
     data = await call_provider(payload)
     content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
@@ -384,20 +500,30 @@ async def ppt_generate(req: PptReq):
     except Exception:
         outline = {"title": req.topic,
                    "slides":[{"title": req.topic, "bullets":["Einführung","Ziele","Überblick"]}],
-                   "closing":{"title":"Abschluss","bullets":["Kernaussage","Call-to-Action"]}}
+                   "closing":{"title":"Abschluss","bullets":["Kernaussage","Nächste Schritte"]}}
 
-    # Sicherstellen: genau N Folien
     want = int(req.slides or 10)
-    cur = outline.get("slides", [])
-    if not isinstance(cur, list):
-        cur = []
-    while len(cur) < want:
-        idx = len(cur) + 1
-        cur.append({"title": f"Vertiefung {idx}",
-                    "bullets": ["Begriff klären", "kurzes Beispiel", "Hinweis für Praxis"]})
-    if len(cur) > want:
-        cur = cur[:want]
-    outline["slides"] = cur
+    outline = normalize_outline(outline, want)
+
+    # Nachbessern bei Wiederholungen/zu kurzen Bullets
+    need_refine = False
+    titles = [s["title"].lower() for s in outline["slides"]]
+    if len(set(titles)) < len(titles):
+        need_refine = True
+    for s in outline["slides"]:
+        if len(_dedupe_keep_order(s["bullets"])) < 3:
+            need_refine = True
+
+    if need_refine:
+        refined=[]
+        for s in outline["slides"]:
+            new_bul = await refine_slide(model, req.topic, req.target or "Allgemeines Publikum", s["title"], api_temperature=temperature)
+            if new_bul:
+                s["bullets"] = new_bul
+            else:
+                s["bullets"] = _dedupe_keep_order(s["bullets"])[:5] or ["Punkt 1","Punkt 2","Punkt 3"]
+            refined.append(s)
+        outline["slides"] = refined
 
     buf = ppt_build(outline)
     headers = {"Content-Disposition": f'attachment; filename="Slides_{safe_name(req.topic)}.pptx"'}
@@ -424,5 +550,4 @@ def download_bundle(bundle_id: str):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "8080"))
-    # 127.0.0.1 lokal; auf Render wird PORT gesetzt und ein Proxy davor geschaltet
     uvicorn.run("server:app", host="0.0.0.0", port=port)
