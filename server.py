@@ -1,7 +1,7 @@
 # server.py
-import os, re, time, io, zipfile, uuid, shutil
+import os, re, time, io, zipfile, uuid, shutil, json
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Dict
 
 import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
@@ -22,17 +22,19 @@ BUNDLES_DIR.mkdir(exist_ok=True)
 # ---------- Provider-Konfiguration ----------
 from dotenv import load_dotenv; load_dotenv()
 OLLAMA_API_KEY    = os.getenv("OLLAMA_API_KEY", "").strip()
+# OpenAI-kompatible Schnittstelle (z.B. .../v1)
 OLLAMA_CLOUD_BASE = os.getenv("OLLAMA_CLOUD_BASE", "https://ollama.com/v1").rstrip("/")
 
-# ---------- Modell-Presets ----------
+# ---------- Modell-Presets (Tokens ↑) ----------
 MODEL_PRESETS = {
-    "deepseek-v3.1:671b-cloud": {"context_window": 65536,  "ideal_max": 3000, "cap": 8000, "temperature": 0.30},
-    "qwen3-coder:480b-cloud":   {"context_window": 131072, "ideal_max": 1800, "cap": 8192, "temperature": 0.20},
-    "glm-4.6:cloud":            {"context_window": 131072, "ideal_max": 1600, "cap": 8192, "temperature": 0.35},
-    "gpt-oss:120b-cloud":       {"context_window": 65536,  "ideal_max": 1400, "cap": 8192, "temperature": 0.35},
-    "qwen3-vl:235b-cloud":      {"context_window": 262144, "ideal_max": 1500, "cap": 6144, "temperature": 0.40},
-    "minimax-m2:cloud":         {"context_window": 200000, "ideal_max": 1200, "cap": 8192, "temperature": 0.40},
-    "gpt-oss:20b-cloud":        {"context_window": 32768,  "ideal_max": 900,  "cap": 4096, "temperature": 0.45},
+    # context_window: grob; ideal_max: Standard-Ausgabe-Limit; cap: harte Obergrenze pro Request
+    "deepseek-v3.1:671b-cloud": {"context_window": 131072, "ideal_max": 5000, "cap": 12000, "temperature": 0.30},
+    "qwen3-coder:480b-cloud":   {"context_window": 131072, "ideal_max": 3600, "cap": 10000, "temperature": 0.25},
+    "glm-4.6:cloud":            {"context_window": 131072, "ideal_max": 3200, "cap": 9000,  "temperature": 0.35},
+    "gpt-oss:120b-cloud":       {"context_window": 65536,  "ideal_max": 2800, "cap": 8000,  "temperature": 0.35},
+    "qwen3-vl:235b-cloud":      {"context_window": 262144, "ideal_max": 3200, "cap": 9000,  "temperature": 0.35},
+    "minimax-m2:cloud":         {"context_window": 200000, "ideal_max": 2400, "cap": 8000,  "temperature": 0.35},
+    "gpt-oss:20b-cloud":        {"context_window": 32768,  "ideal_max": 1400, "cap": 4000,  "temperature": 0.45},
 }
 MODEL_ALIASES = {
     "deepseek": "deepseek-v3.1:671b-cloud",
@@ -56,7 +58,7 @@ def choose_tokens_and_temp(model: str, requested_max: Optional[int], req_temp: O
     preset = MODEL_PRESETS.get(canon, MODEL_PRESETS["qwen3-coder:480b-cloud"])
     cap = int(preset["cap"])
     ideal = int(preset["ideal_max"])
-    chosen_max = max(300, min(int(requested_max or ideal), cap))
+    chosen_max = max(600, min(int(requested_max or ideal), cap))
     temperature = float(req_temp if req_temp is not None else preset["temperature"])
     meta = {
         "model_canonical": canon,
@@ -79,6 +81,7 @@ app.add_middleware(
 )
 app.mount("/static", StaticFiles(directory=str(PUBLIC_DIR)), name="static")
 
+# Pfade auf /html/... wie in deiner Version
 INDEX_FILE = BASE_DIR / "html/index.html"
 WEBSITE_FILE = BASE_DIR / "html/website.html"
 PPT_FILE = BASE_DIR / "html/ppt.html"
@@ -119,7 +122,7 @@ class PptReq(BaseModel):
     target: Optional[str] = "Allgemeines Publikum"
     slides: Optional[int] = 10
     model: Optional[str] = "qwen3-coder:480b-cloud"
-    temperature: Optional[float] = 0.25
+    temperature: Optional[float] = 0.30
 
 # ---------- Helpers ----------
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -138,21 +141,21 @@ async def call_provider(payload: dict) -> dict:
         raise HTTPException(status_code=500, detail="OLLAMA_API_KEY fehlt")
     url = f"{OLLAMA_CLOUD_BASE}/chat/completions"
     headers = {"Authorization": f"Bearer {OLLAMA_API_KEY}", "Content-Type": "application/json"}
-    limits  = httpx.Limits(max_keepalive_connections=2, max_connections=4)
-    timeout = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=20.0)
-    retriable = {408, 502, 503, 504}
+    limits  = httpx.Limits(max_keepalive_connections=4, max_connections=8)
+    timeout = httpx.Timeout(connect=10.0, read=180.0, write=40.0, pool=30.0)
+    retriable = {408, 409, 429, 502, 503, 504}
     async with httpx.AsyncClient(http2=False, limits=limits, timeout=timeout) as client:
-        backoff = 1.0
-        for attempt in range(2):
+        backoff = 1.2
+        for attempt in range(3):
             try:
                 r = await client.post(url, headers=headers, json=payload)
-                if r.status_code in retriable and attempt == 0:
-                    time.sleep(backoff); backoff *= 2; continue
+                if r.status_code in retriable and attempt < 2:
+                    time.sleep(backoff); backoff *= 1.6; continue
                 if r.status_code >= 400:
-                    raise HTTPException(status_code=502, detail=f"Provider {r.status_code}: {r.text[:400]}")
+                    raise HTTPException(status_code=502, detail=f"Provider {r.status_code}: {r.text[:600]}")
                 return r.json()
             except httpx.RequestError as e:
-                if attempt == 0:
+                if attempt < 2:
                     time.sleep(1.5); continue
                 raise HTTPException(status_code=502, detail=f"Netzwerkfehler: {e}")
 
@@ -175,18 +178,27 @@ def fix_img_paths_relative(html: str, image_names: List[str]) -> str:
 def absolutize_for_preview(html: str, bundle_id: str) -> str:
     return re.sub(r'(["\'(])assets/', rf'\1/bundles/{bundle_id}/assets/', html)
 
+# ---------- PPT: Outline-Prompt strenger (JSON only, genau N Folien) ----------
 def ppt_outline_prompt(topic: str, target: str, slides: int) -> dict:
     system = (
-        "Du bist ein Präsentations-Assistent. Antworte NUR mit JSON.\n"
-        "Format:\n"
+        "Du bist ein strenger Präsentations-Assistent. Antworte NUR als gültiges JSON-Objekt.\n"
+        f"- Erzeuge GENAU {slides} Inhaltsfolien in \"slides\".\n"
+        "- Jede Folie: einzigartiger 'title' und 3–5 prägnante 'bullets' ohne Wiederholungen.\n"
+        "- KEIN Text außerhalb des JSON.\n"
+        "Schema:\n"
         "{\n"
-        '  "title": "...",\n'
-        '  "subtitle": "...",\n'
-        '  "slides": [ {"title":"...","bullets":["...","..."]} ],\n'
-        '  "closing": {"title":"...","bullets":["..."]}\n'
+        '  \"title\": \"...\",\n'
+        '  \"subtitle\": \"...\",\n'
+        '  \"slides\": [ { \"title\": \"...\", \"bullets\": [\"...\",\"...\"] } ],\n'
+        '  \"closing\": { \"title\": \"...\", \"bullets\": [\"...\",\"...\"] }\n'
         "}\n"
     )
-    user = f'Thema: "{topic}"\nZielgruppe: "{target}"\nAnzahl Inhaltsfolien: {slides} bis {slides+2}\nNur JSON, keine Erklärungen.'
+    user = (
+        f'Thema: \"{topic}\"\n'
+        f'Zielgruppe: \"{target}\"\n'
+        "Struktur: Einführung • Hauptideen • Beispiele/Use-Cases • Zahlen/Fakten • Ausblick/FAQ.\n"
+        "Antwort ausschließlich als JSON-Objekt."
+    )
     return {
         "messages": [
             {"role":"system","content":system},
@@ -194,33 +206,62 @@ def ppt_outline_prompt(topic: str, target: str, slides: int) -> dict:
         ]
     }
 
+# ---------- PPT: basic Styling ----------
 def ppt_build(outline: dict) -> io.BytesIO:
     prs = Presentation()
+    title_font_size = Pt(46)
+    bullet_font_size = Pt(21)
+
+    # Titelfolie
     s = prs.slides.add_slide(prs.slide_layouts[0])
     s.shapes.title.text = outline.get("title","Präsentation")
     if len(s.placeholders) > 1:
         s.placeholders[1].text = outline.get("subtitle","")
+    try:
+        s.shapes.title.text_frame.paragraphs[0].font.size = Pt(52)
+        s.shapes.title.text_frame.paragraphs[0].font.bold = True
+    except Exception:
+        pass
+
+    # Inhaltsfolien
     for it in outline.get("slides", []):
         sl = prs.slides.add_slide(prs.slide_layouts[1])
         sl.shapes.title.text = it.get("title","")
+        try:
+            sl.shapes.title.text_frame.paragraphs[0].font.size = title_font_size
+            sl.shapes.title.text_frame.paragraphs[0].font.bold = True
+        except Exception:
+            pass
         body = sl.shapes.placeholders[1].text_frame
         body.clear()
-        first = True
-        for b in it.get("bullets", []):
-            if first:
-                body.text = str(b); first = False
-            else:
-                p = body.add_paragraph(); p.text = str(b); p.level = 0
+        bullets = (it.get("bullets") or [])[:8]
+        if bullets:
+            body.text = str(bullets[0])
+            body.paragraphs[0].font.size = bullet_font_size
+            for b in bullets[1:]:
+                p = body.add_paragraph()
+                p.text = str(b)
+                p.level = 0
+                p.font.size = bullet_font_size
+
+    # Abschluss
     cl = outline.get("closing")
     if cl:
         sl = prs.slides.add_slide(prs.slide_layouts[1])
         sl.shapes.title.text = cl.get("title","Abschluss")
+        try:
+            sl.shapes.title.text_frame.paragraphs[0].font.size = title_font_size
+            sl.shapes.title.text_frame.paragraphs[0].font.bold = True
+        except Exception:
+            pass
         body = sl.shapes.placeholders[1].text_frame
         body.clear()
-        first = True
-        for b in cl.get("bullets", []):
-            if first: body.text = str(b); first = False
-            else:     p = body.add_paragraph(); p.text = str(b); p.level = 0
+        bullets = (cl.get("bullets") or [])[:8]
+        if bullets:
+            body.text = str(bullets[0]); body.paragraphs[0].font.size = bullet_font_size
+            for b in bullets[1:]:
+                p = body.add_paragraph(); p.text = str(b); p.level = 0; p.font.size = bullet_font_size
+
     buf = io.BytesIO(); prs.save(buf); buf.seek(0); return buf
 
 # ---------- Upload ----------
@@ -249,7 +290,8 @@ async def generate(req: GenReq):
     if not req.prompt:
         raise HTTPException(status_code=400, detail="prompt fehlt")
 
-    max_tokens, temperature, picked = choose_tokens_and_temp(req.model, req.max_tokens, req.temperature)
+    # Höheres Standardbudget, falls nicht gesetzt
+    max_tokens, temperature, picked = choose_tokens_and_temp(req.model, req.max_tokens or None, req.temperature)
     model = picked["model_canonical"]
 
     bid = ensure_bundle(req.bundle_id)
@@ -258,11 +300,10 @@ async def generate(req: GenReq):
     names = [n for n in (req.image_names or images_on_disk) if (assets_dir / n).exists()]
 
     system = (
-        "Du bist ein KI-Webdesigner. Antworte NUR mit einem vollständigen, lauffähigen "
-        "HTML-Dokument inkl. eingebettetem CSS. Keine externen Skripte/Fonts.\n"
-        "Wenn Bilder vorhanden sind, MUSST du sie sichtbar einbauen. "
-        "Nutze dafür <img src=\"assets/NAME\" alt=\"…\"> und verwende mehrere Bereiche: "
-        "Hero mit großem Bild, Galerie/Portfolio-Grid, und ggf. Feature-Sektion mit kleineren Thumbnails."
+        "Du bist ein KI-Webdesigner. Antworte NUR mit einem vollständigen, validen HTML5-Dokument "
+        "inkl. eingebettetem CSS. Keine externen Skripte/Fonts.\n"
+        "Wenn Bilder vorhanden sind, MUSST du sie sichtbar einbauen "
+        "mit <img src=\"assets/NAME\" alt=\"…\"> in Hero, Galerie und ggf. Feature-Sektionen."
     )
 
     images_block = ""
@@ -272,7 +313,7 @@ async def generate(req: GenReq):
     user = (
         f"Erstelle eine moderne One-Page basierend auf:\n\n{req.prompt}\n\n"
         f"{images_block}"
-        "- Semantisches HTML, responsives CSS, dunkles Theme erlaubt.\n"
+        "- Semantisches HTML, responsive Typografie und Layout, dunkles Theme erlaubt.\n"
         "- Gib ausschließlich das vollständige HTML-Dokument zurück."
     )
 
@@ -283,7 +324,7 @@ async def generate(req: GenReq):
             {"role": "user",   "content": user},
         ],
         "temperature": temperature,
-        "max_tokens": max_tokens,
+        "max_tokens": max_tokens,   # höher durch Presets
         "stream": False,
     }
 
@@ -313,14 +354,16 @@ async def generate(req: GenReq):
         "applied": picked
     }
 
-# ---------- PPT Generate ----------
+# ---------- PPT Generate (Tokens ↑, JSON erzwingen falls möglich) ----------
 @app.post("/ppt_generate")
 async def ppt_generate(req: PptReq):
     if not req.topic:
         raise HTTPException(status_code=400, detail="topic fehlt")
 
-    max_tokens, temperature, picked = choose_tokens_and_temp(req.model, 1500, req.temperature)
+    # Höheres Budget für Outline
+    max_tokens, temperature, picked = choose_tokens_and_temp(req.model, 3000, req.temperature)
     model = picked["model_canonical"]
+
     payload = {
         "model": model,
         **ppt_outline_prompt(req.topic, req.target or "Allgemeines Publikum", int(req.slides or 10)),
@@ -328,6 +371,9 @@ async def ppt_generate(req: PptReq):
         "max_tokens": max_tokens,
         "stream": False
     }
+    # Falls der Provider OpenAI's response_format unterstützt:
+    payload["response_format"] = {"type": "json_object"}
+
     data = await call_provider(payload)
     content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
 
@@ -339,6 +385,20 @@ async def ppt_generate(req: PptReq):
         outline = {"title": req.topic,
                    "slides":[{"title": req.topic, "bullets":["Einführung","Ziele","Überblick"]}],
                    "closing":{"title":"Abschluss","bullets":["Kernaussage","Call-to-Action"]}}
+
+    # Sicherstellen: genau N Folien
+    want = int(req.slides or 10)
+    cur = outline.get("slides", [])
+    if not isinstance(cur, list):
+        cur = []
+    while len(cur) < want:
+        idx = len(cur) + 1
+        cur.append({"title": f"Vertiefung {idx}",
+                    "bullets": ["Begriff klären", "kurzes Beispiel", "Hinweis für Praxis"]})
+    if len(cur) > want:
+        cur = cur[:want]
+    outline["slides"] = cur
+
     buf = ppt_build(outline)
     headers = {"Content-Disposition": f'attachment; filename="Slides_{safe_name(req.topic)}.pptx"'}
     return StreamingResponse(buf,
@@ -364,4 +424,5 @@ def download_bundle(bundle_id: str):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "8080"))
-    uvicorn.run("server:app", host="127.0.0.1", port=port)
+    # 127.0.0.1 lokal; auf Render wird PORT gesetzt und ein Proxy davor geschaltet
+    uvicorn.run("server:app", host="0.0.0.0", port=port)
