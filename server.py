@@ -26,7 +26,7 @@ OLLAMA_API_KEY    = os.getenv("OLLAMA_API_KEY", "").strip()
 # OpenAI-kompatibel, z. B. https://<host>/v1
 OLLAMA_CLOUD_BASE = os.getenv("OLLAMA_CLOUD_BASE", "https://ollama.com/v1").rstrip("/")
 
-# ---------- Modell-Presets (Tokens ↑) ----------
+# ---------- Modell-Presets ----------
 MODEL_PRESETS = {
     "deepseek-v3.1:671b-cloud": {"context_window": 131072, "ideal_max": 5000, "cap": 12000, "temperature": 0.30},
     "qwen3-coder:480b-cloud":   {"context_window": 131072, "ideal_max": 3600, "cap": 10000, "temperature": 0.25},
@@ -56,8 +56,7 @@ def resolve_model(name: str) -> str:
 def choose_tokens_and_temp(model: str, requested_max: Optional[int], req_temp: Optional[float]):
     canon = resolve_model(model)
     preset = MODEL_PRESETS.get(canon, MODEL_PRESETS["qwen3-coder:480b-cloud"])
-    cap = int(preset["cap"])
-    ideal = int(preset["ideal_max"])
+    cap = int(preset["cap"]); ideal = int(preset["ideal_max"])
     chosen_max = max(600, min(int(requested_max or ideal), cap))
     temperature = float(req_temp if req_temp is not None else preset["temperature"])
     meta = {
@@ -124,7 +123,7 @@ class PptReq(BaseModel):
     model: Optional[str] = "qwen3-coder:480b-cloud"
     temperature: Optional[float] = 0.30
 
-# ---------- JSON-Schema für PPT-Outline ----------
+# ---------- JSON-Schemata ----------
 SLIDE_JSON_SCHEMA = {
     "name": "ppt_outline",
     "schema": {
@@ -163,6 +162,29 @@ SLIDE_JSON_SCHEMA = {
     }
 }
 
+RESEARCH_JSON_SCHEMA = {
+    "name": "ppt_research",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "background": {"type": "string"},
+            "key_points": {"type": "array", "items": {"type": "string"}, "minItems": 8, "maxItems": 24},
+            "data_points": {"type": "array", "items": {"type": "string"}, "minItems": 6, "maxItems": 24},
+            "slide_suggestions": {"type": "array", "items": {"type": "string"}},
+            "sources": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"title":{"type":"string"}, "url":{"type":"string"}},
+                    "required": ["title","url"]
+                }
+            }
+        },
+        "required": ["background","key_points","data_points","slide_suggestions"],
+        "additionalProperties": False
+    }
+}
+
 # ---------- Helpers ----------
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 def safe_name(name: str) -> str:
@@ -181,7 +203,7 @@ async def call_provider(payload: dict) -> dict:
     url = f"{OLLAMA_CLOUD_BASE}/chat/completions"
     headers = {"Authorization": f"Bearer {OLLAMA_API_KEY}", "Content-Type": "application/json"}
     limits  = httpx.Limits(max_keepalive_connections=4, max_connections=8)
-    timeout = httpx.Timeout(connect=10.0, read=180.0, write=40.0, pool=30.0)
+    timeout = httpx.Timeout(connect=10.0, read=240.0, write=40.0, pool=30.0)
     retriable = {408, 409, 429, 502, 503, 504}
     async with httpx.AsyncClient(http2=False, limits=limits, timeout=timeout) as client:
         backoff = 1.2
@@ -242,15 +264,20 @@ def normalize_outline(outline: dict, want: int) -> dict:
             continue
         title_seen.add(tkey)
         bullets = _dedupe_keep_order((s or {}).get("bullets") or [])
-        while len(bullets) < 3:
-            bullets.append("Aspekt ergänzen")
+        # generische Phrasen hart rausfiltern
+        def bad(b): 
+            bb=str(b).strip().lower()
+            return bb in {"begriff klären","kurzes beispiel","hinweis für praxis","platzhalter","n.n."}
+        bullets = [x for x in bullets if not bad(x)]
+        while len(bullets) < 4:
+            bullets.append("Konkreten Aspekt ergänzen")
         cleaned.append({"title": t, "bullets": bullets[:6]})
     slides = cleaned
 
     while len(slides) < want:
         idx = len(slides) + 1
         slides.append({"title": f"Vertiefung {idx}",
-                       "bullets": ["Begriff klären", "kurzes Beispiel", "Hinweis für Praxis"]})
+                       "bullets": ["Begriff definieren", "Messbare Kennzahl", "Beispiel mit Kontext", "Implikation"]})
     if len(slides) > want:
         slides = slides[:want]
     outline["slides"] = slides
@@ -263,65 +290,7 @@ def normalize_outline(outline: dict, want: int) -> dict:
     outline["closing"] = {"title": ctitle, "bullets": cbul[:6]}
     return outline
 
-async def refine_slide(model: str, topic: str, target: str, title: str, api_temperature: float = 0.3) -> List[str]:
-    """Erzwingt 3–5 neue, unterscheidbare Bullets für eine einzelne Folie."""
-    prompt_sys = (
-        "Du schreibst prägnante Stichpunkte für Präsentationsfolien. "
-        "Antworte NUR als JSON-Liste von Strings, z. B. [\"Punkt 1\", \"Punkt 2\", \"Punkt 3\"]."
-    )
-    prompt_usr = (
-        f"Thema: {topic}\nZielgruppe: {target}\nFolie: {title}\n"
-        "Gib 3–5 unterschiedliche, konkrete Bullets. Keine Wiederholung, keine Meta-Erklärungen."
-    )
-    payload = {
-        "model": model,
-        "messages": [
-            {"role":"system","content":prompt_sys},
-            {"role":"user","content":prompt_usr}
-        ],
-        "temperature": api_temperature,
-        "max_tokens": 400,
-        "stream": False
-    }
-    # JSON erzwingen (falls unterstützt)
-    payload["response_format"] = {"type": "json_object"}
-    data = await call_provider(payload)
-    txt = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
-    m = re.search(r"\[\s*.*\s*\]\s*$", txt, re.S)
-    raw = m.group(0) if m else txt
-    try:
-        arr = json.loads(raw)
-        if isinstance(arr, dict) and "bullets" in arr:
-            arr = arr["bullets"]
-        if not isinstance(arr, list):
-            return []
-        arr = [str(x).strip() for x in arr if str(x).strip()]
-        return _dedupe_keep_order(arr)[:5]
-    except Exception:
-        return []
-
-# ---------- Prompts ----------
-def ppt_outline_prompt(topic: str, target: str, slides: int) -> dict:
-    system = (
-        "Du bist ein strenger Präsentations-Assistent. Antworte NUR als gültiges JSON-Objekt.\n"
-        f"- Erzeuge GENAU {slides} Inhaltsfolien in \"slides\".\n"
-        "- Jede Folie: einzigartiger 'title' und 3–5 prägnante 'bullets' ohne Wiederholungen.\n"
-        "- KEIN Text außerhalb des JSON."
-    )
-    user = (
-        f'Thema: "{topic}"\n'
-        f'Zielgruppe: "{target}"\n'
-        "Strukturvorschlag: Einführung • Kernideen • Beispiele/Use-Cases • Zahlen/Fakten • Ausblick/FAQ.\n"
-        "Antwort ausschließlich als JSON-Objekt mit Schlüsseln: title, subtitle, slides[], closing."
-    )
-    return {
-        "messages": [
-            {"role":"system","content":system},
-            {"role":"user","content":user}
-        ]
-    }
-
-# ---------- PPT: basic Styling ----------
+# ---------- PPT: Bau ----------
 def ppt_build(outline: dict) -> io.BytesIO:
     prs = Presentation()
     title_font_size = Pt(46)
@@ -378,26 +347,6 @@ def ppt_build(outline: dict) -> io.BytesIO:
                 p = body.add_paragraph(); p.text = str(b); p.level = 0; p.font.size = bullet_font_size
 
     buf = io.BytesIO(); prs.save(buf); buf.seek(0); return buf
-
-# ---------- Upload ----------
-@app.post("/upload")
-async def upload(files: List[UploadFile] = File(...), bundle_id: Optional[str] = Form(None)):
-    bid = ensure_bundle(bundle_id)
-    assets_dir = BUNDLES_DIR / bid / "assets"
-    saved = []
-    for uf in files:
-        name = safe_name(uf.filename or "upload")
-        (assets_dir / name).write_bytes(await uf.read())
-        saved.append(name)
-    return {"bundle_id": bid, "assets": saved}
-
-@app.get("/bundles/{bundle_id}/assets/{filename:path}")
-def serve_bundle_asset(bundle_id: str, filename: str):
-    safe = safe_name(Path(filename).name)
-    file_path = BUNDLES_DIR / bundle_id / "assets" / safe
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="asset not found")
-    return FileResponse(str(file_path))
 
 # ---------- Website Generate ----------
 @app.post("/generate")
@@ -468,63 +417,127 @@ async def generate(req: GenReq):
         "applied": picked
     }
 
-# ---------- PPT Generate ----------
+# ---------- PPT: Recherche-Prompts ----------
+def research_prompt(topic: str, target: str, slides: int) -> dict:
+    sys = (
+        "Du bist ein Research-Assistent. Erstelle eine faktenbasierte Zusammenfassung als JSON. "
+        "Keine Floskeln, keine Platzhalter. Prägnant, prüfbar, thematisch fokussiert."
+    )
+    usr = (
+        f"Thema: {topic}\nZielgruppe: {target}\n"
+        f"Ziel: Erzeuge evidenzbasierte Inhalte für eine Präsentation mit ~{slides} Folien.\n\n"
+        "JSON-Felder:\n"
+        "- background: 150–300 Wörter mit Kernkontext.\n"
+        "- key_points: 8–20 kurze, eigenständige Kernaussagen.\n"
+        "- data_points: 6–20 knappe Fakten/Trends/Zahlen (ohne Prosa).\n"
+        "- slide_suggestions: Liste mit prägnanten Folientiteln (mind. so viele wie Folien).\n"
+        "- sources: optional, Liste aus Objekten {title, url}.\n"
+        "Ausschließlich JSON zurückgeben."
+    )
+    return {"messages":[{"role":"system","content":sys},{"role":"user","content":usr}]}
+
+def slide_prompt_from_research(topic: str, target: str, title: str, research: dict) -> dict:
+    background = (research.get("background") or "")[:1800]
+    key_points = research.get("key_points") or []
+    data_points = research.get("data_points") or []
+    kp = "\n".join(f"- {k}" for k in key_points[:20])
+    dp = "\n".join(f"- {d}" for d in data_points[:20])
+
+    sys = (
+        "Du schreibst präzise Stichpunkte für Folienslides. "
+        "Antworte NUR als JSON-Array von 4–6 Strings. Keine Erklärsätze, keine Meta-Hinweise, "
+        "keine Floskeln wie 'Begriff klären' oder 'kurzes Beispiel'."
+    )
+    usr = (
+        f"Thema: {topic}\nZielgruppe: {target}\nFolientitel: {title}\n\n"
+        f"Kontext:\n{background}\n\n"
+        f"Key Points:\n{kp}\n\nDatenpunkte:\n{dp}\n\n"
+        "Gib 4–6 unterschiedlich formulierte, konkrete Bullets mit Zahlen/Beispielen, "
+        "wenn sinnvoll. Vermeide Dopplungen."
+    )
+    return {"messages":[{"role":"system","content":sys},{"role":"user","content":usr}]}
+
+# ---------- PPT Generate (Recherche -> Slides) ----------
 @app.post("/ppt_generate")
 async def ppt_generate(req: PptReq):
     if not req.topic:
         raise HTTPException(status_code=400, detail="topic fehlt")
 
-    max_tokens, temperature, picked = choose_tokens_and_temp(req.model, 3000, req.temperature)
+    want = int(req.slides or 10)
+    # 1) RESEARCH
+    max_tokens_r, temperature_r, picked = choose_tokens_and_temp(req.model, 4000, req.temperature)
     model = picked["model_canonical"]
 
-    payload = {
+    payload_r = {
         "model": model,
-        **ppt_outline_prompt(req.topic, req.target or "Allgemeines Publikum", int(req.slides or 10)),
-        "temperature": temperature,
-        "max_tokens": max_tokens,
+        **research_prompt(req.topic, req.target or "Allgemeines Publikum", want),
+        "temperature": max(0.1, min(0.6, temperature_r)),
+        "max_tokens": max_tokens_r,
         "stream": False
     }
-    # JSON erzwingen, falls vom Provider unterstützt
-    payload["response_format"] = {
-        "type": "json_schema",
-        "json_schema": SLIDE_JSON_SCHEMA
-    }
+    # JSON erzwingen, wenn unterstützt
+    payload_r["response_format"] = {"type": "json_schema", "json_schema": RESEARCH_JSON_SCHEMA}
 
-    data = await call_provider(payload)
-    content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-
-    m = re.search(r"\{.*\}\s*$", content, re.S)
-    raw_json = m.group(0) if m else content
+    data_r = await call_provider(payload_r)
+    txt_r = data_r.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+    m = re.search(r"\{.*\}\s*$", txt_r, re.S)
+    raw_r = m.group(0) if m else txt_r
     try:
-        outline = json.loads(raw_json)
+        research = json.loads(raw_r)
     except Exception:
-        outline = {"title": req.topic,
-                   "slides":[{"title": req.topic, "bullets":["Einführung","Ziele","Überblick"]}],
-                   "closing":{"title":"Abschluss","bullets":["Kernaussage","Nächste Schritte"]}}
+        research = {"background":"", "key_points":[], "data_points":[], "slide_suggestions":[f"Folie {i+1}" for i in range(want)]}
 
-    want = int(req.slides or 10)
+    # Slide-Titel bestimmen
+    titles = research.get("slide_suggestions") or []
+    titles = [t for t in titles if str(t).strip()]
+    if len(titles) < want:
+        # fallback: generische, aber unterschiedliche Titel
+        for i in range(len(titles), want):
+            titles.append(f"Vertiefung {i+1}")
+
+    # 2) PRO SLIDE INHALT ERZEUGEN
+    slides = []
+    for i in range(want):
+        t = str(titles[i] if i < len(titles) else f"Vertiefung {i+1}").strip()
+        # Zweiter Call pro Folie
+        payload_s = {
+            "model": model,
+            **slide_prompt_from_research(req.topic, req.target or "Allgemeines Publikum", t, research),
+            "temperature": max(0.2, min(0.7, req.temperature or 0.35)),
+            "max_tokens": 600,
+            "stream": False
+        }
+        payload_s["response_format"] = {"type": "json_object"}  # viele Anbieter akzeptieren das
+        data_s = await call_provider(payload_s)
+        txt_s = data_s.get("choices", [{}])[0].get("message", {}).get("content", "[]")
+        m = re.search(r"\[\s*.*\s*\]\s*$", txt_s, re.S)
+        raw = m.group(0) if m else txt_s
+        try:
+            arr = json.loads(raw)
+            if isinstance(arr, dict) and "bullets" in arr:
+                arr = arr["bullets"]
+            if not isinstance(arr, list): arr = []
+        except Exception:
+            arr = []
+
+        # Cleanup + Anti-Platzhalter
+        def bad(b):
+            bb=str(b).strip().lower()
+            return bb in {"begriff klären","kurzes beispiel","hinweis für praxis","platzhalter","n.n."} or len(bb)<3
+        bullets = [str(x).strip() for x in arr if str(x).strip() and not bad(x)]
+        bullets = _dedupe_keep_order(bullets)
+        if len(bullets) < 4:
+            # Fallback: konstruktive Defaults
+            bullets += ["Definition mit Beispiel", "Aktuelle Kennzahl/Trend", "Konkreter Einfluss/Anwendung", "Takeaway/Implikation"]
+        slides.append({"title": t, "bullets": bullets[:6]})
+
+    outline = {"title": req.topic, "subtitle": req.target or "", "slides": slides,
+               "closing":{"title":"Abschluss","bullets":["Kernaussage","Nächste Schritte"]}}
+
+    # Normalisieren auf exakt N, Duplikate entfernen
     outline = normalize_outline(outline, want)
 
-    # Nachbessern bei Wiederholungen/zu kurzen Bullets
-    need_refine = False
-    titles = [s["title"].lower() for s in outline["slides"]]
-    if len(set(titles)) < len(titles):
-        need_refine = True
-    for s in outline["slides"]:
-        if len(_dedupe_keep_order(s["bullets"])) < 3:
-            need_refine = True
-
-    if need_refine:
-        refined=[]
-        for s in outline["slides"]:
-            new_bul = await refine_slide(model, req.topic, req.target or "Allgemeines Publikum", s["title"], api_temperature=temperature)
-            if new_bul:
-                s["bullets"] = new_bul
-            else:
-                s["bullets"] = _dedupe_keep_order(s["bullets"])[:5] or ["Punkt 1","Punkt 2","Punkt 3"]
-            refined.append(s)
-        outline["slides"] = refined
-
+    # 3) PPT bauen
     buf = ppt_build(outline)
     headers = {"Content-Disposition": f'attachment; filename="Slides_{safe_name(req.topic)}.pptx"'}
     return StreamingResponse(buf,
