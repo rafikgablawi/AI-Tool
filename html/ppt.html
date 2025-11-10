@@ -1,4 +1,3 @@
-<!-- ppt.html -->
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -15,16 +14,15 @@
     input,button{border-radius:10px;font-size:14px;border:1px solid var(--border);background:var(--panel);color:var(--text);padding:10px}
     .status{font-size:13px;color:var(--muted);margin-top:8px;min-height:18px}
     .err{color:#fca5a5}
+
+    /* Modell-Auswahl: nur Name + Beschreibung */
     .models{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;width:90%;max-width:1100px;margin:10px 0}
     .card{border:1px solid var(--border);background:var(--panel);border-radius:12px;padding:12px;cursor:pointer;transition:transform .05s ease}
     .card:hover{transform:translateY(-1px)}
     .card.active{outline:2px solid var(--accent)}
-    .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
-    .name{font-weight:bold}
-    .badge{font-size:12px;color:#cbd5e1}
-    .bar{height:8px;background:#0e152e;border-radius:6px;overflow:hidden;margin:8px 0}
-    .fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));width:0%}
-    .meta{font-size:12px;color:#9fb1cc}
+    .name{font-weight:bold;margin-bottom:6px}
+    .desc{font-size:12px;color:#cbd5e1;opacity:.95;line-height:1.35}
+
     img.logo{width:120px;border-radius:12px;margin-bottom:10px}
   </style>
   <link rel="icon" href="/static/logo.jpg">
@@ -40,6 +38,7 @@
   </div>
 
   <div class="models" id="models"></div>
+
   <div class="row">
     <button id="go">PPTX erzeugen</button>
   </div>
@@ -52,17 +51,16 @@
     const modelsEl = $("#models");
 
     let selectedModel = "qwen3-coder:480b-cloud";
-    let maxTokens = 1500;
-    let temperature = 0.25;
 
+    // Nur Name + Kurzbeschreibung (aus deiner Tabelle)
     const PRESETS = {
-      "deepseek-v3.1:671b-cloud": {label:"DeepSeek V3.1", context_window:65536, ideal_max:2200, cap:8000, temp:0.30, note:"Outline länger möglich"},
-      "qwen3-coder:480b-cloud":   {label:"Qwen3 Coder",   context_window:131072,ideal_max:1500, cap:8192, temp:0.25, note:"stabil für strukturierte JSON-Outlines"},
-      "glm-4.6:cloud":            {label:"GLM-4.6",       context_window:131072,ideal_max:1500, cap:8192, temp:0.35, note:"guter Kompromiss"},
-      "gpt-oss:120b-cloud":       {label:"GPT-OSS 120B",  context_window:65536, ideal_max:1400, cap:8192, temp:0.35, note:"solide"},
-      "qwen3-vl:235b-cloud":      {label:"Qwen3-VL",      context_window:262144,ideal_max:1500, cap:6144, temp:0.35, note:"VL optional"},
-      "minimax-m2:cloud":         {label:"MiniMax-M2",    context_window:200000,ideal_max:1200, cap:8192, temp:0.35, note:"schnell"},
-      "gpt-oss:20b-cloud":        {label:"GPT-OSS 20B",   context_window:32768, ideal_max:900,  cap:4096, temp:0.45, note:"klein"}
+      "deepseek-v3.1:671b-cloud": {label:"DeepSeek V3.1", desc:"stärkstes Gesamtmodell (Reasoning + Coding + Analyse)"},
+      "qwen3-coder:480b-cloud":   {label:"Qwen3 Coder",   desc:"beste Codeleistung, stark auch sprachlich"},
+      "glm-4.6:cloud":            {label:"GLM-4.6",       desc:"gutes Gleichgewicht aus Leistung und Tempo"},
+      "gpt-oss:120b-cloud":       {label:"GPT-OSS 120B",  desc:"solider Allrounder"},
+      "qwen3-vl:235b-cloud":      {label:"Qwen3-VL",      desc:"stark für Text+Bild"},
+      "minimax-m2:cloud":         {label:"MiniMax-M2",    desc:"leichtgewichtig, schnell"},
+      "gpt-oss:20b-cloud":        {label:"GPT-OSS 20B",   desc:"kleine Aufgaben"}
     };
 
     function setStatus(m, err=false){ statusEl.textContent=m||""; statusEl.className="status"+(err?" err":""); }
@@ -73,18 +71,14 @@
         const card = document.createElement("div");
         card.className = "card" + (key===selectedModel ? " active":"");
         card.innerHTML = `
-          <div class="top">
-            <div class="name">${p.label}</div>
-            <div class="badge">${(p.context_window/1024).toFixed(0)}k ctx</div>
-          </div>
-          <div class="bar"><div class="fill" style="width:${Math.min(100, (p.ideal_max/p.cap)*100)}%"></div></div>
-          <div class="meta">ideal: ${p.ideal_max} • cap: ${p.cap} • temp: ${p.temp}<br><span style="opacity:.8">${p.note}</span></div>
+          <div class="name">${p.label}</div>
+          <div class="desc">${p.desc}</div>
         `;
         card.addEventListener("click", ()=>{
           document.querySelectorAll(".card").forEach(c=>c.classList.remove("active"));
           card.classList.add("active");
-          selectedModel = key; maxTokens = p.ideal_max; temperature = p.temp;
-          setStatus(`Modell: ${p.label} • ctx ${(p.context_window/1024).toFixed(0)}k • max_tokens ${p.ideal_max}`);
+          selectedModel = key;
+          setStatus("Modell: " + p.label);
         });
         modelsEl.appendChild(card);
       });
@@ -103,7 +97,7 @@
           headers:{"Content-Type":"application/json"},
           body: JSON.stringify({
             topic, target, slides,
-            model: selectedModel, temperature
+            model: selectedModel
           })
         });
         if(!r.ok){
